@@ -10,4 +10,4 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 # 网页与 /api/status 都会显示它。发版时改这一行即可。
 set(PROJECT_VER "1.14.0")
 
-project(aqueduct)
+project(water_meter)

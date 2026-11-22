@@ -1,13 +1,12 @@
-# Aqueduct · ESP32-C3 超声水表抄表器
+# ESP32-C3 超声水表抄表器
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Switchyard](https://img.shields.io/badge/上位机-switchyard-41BDF5.svg)](https://github.com/xiao-si-qi/switchyard)
 
-> aqueduct：引水渠。铁路调车归 [Switchyard](https://github.com/xiao-si-qi/switchyard)，
-> 家里这条"水渠"归它管。
+**ESP32-C3 + RS485** 的超声水表抄表器：读累计水量、开关阀门、量电池与温湿度、
+检测漏水与通信故障，通过 MQTT 接入 Home Assistant / [Switchyard](https://github.com/xiao-si-qi/switchyard)。
 
-一块 **ESP32-C3 + RS485** 的超声水表抄表器：读累计水量、开关阀门、量电池与温湿度、
-检测漏水与通信故障，通过 MQTT 接入 Home Assistant / Switchyard。
+设备 ID 默认 `wm_001`，MQTT 主题 `switchyard/wm_001/*`。
 
 ```
         RS485 (Modbus RTU)              Wi-Fi + MQTT
