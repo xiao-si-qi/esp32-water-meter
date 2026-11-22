@@ -1,16 +1,25 @@
-# ESP32-C3 超声水表抄表器
+# ESP32-C3 电子远传水表抄表器
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Switchyard](https://img.shields.io/badge/上位机-switchyard-41BDF5.svg)](https://github.com/xiao-si-qi/switchyard)
 
-**ESP32-C3 + RS485** 的超声水表抄表器：读累计水量、开关阀门、量电池与温湿度、
+**ESP32-C3 + RS485** 的电子远传水表抄表器：读累计水量、开关阀门、量电池与温湿度、
 检测漏水与通信故障，通过 MQTT 接入 Home Assistant / [Switchyard](https://github.com/xiao-si-qi/switchyard)。
 
 设备 ID 默认 `wm_001`，MQTT 主题 `switchyard/wm_001/*`。
 
+<img src="docs/water-meter.jpg" width="420" alt="山东依泉 光电直读式电子远传水表">
+
+| 水表 | 说明 |
+|---|---|
+| 厂家 | 山东依泉仪表有限公司 |
+| 类型 | 光电直读式电子远传水表（RS485 / Modbus RTU 从站） |
+| 阀控 | 光电阀控（`2021F1226-37`） |
+| 抄读 | 累计水量 + 阀门开关 + 到位反馈 |
+
 ```
         RS485 (Modbus RTU)              Wi-Fi + MQTT
-超声水表 ──────────────► ESP32-C3 ──────────────────► switchyard ──► HA
+电子远传水表 ────────► ESP32-C3 ──────────────────► switchyard ──► HA
   · 累计水量                                        · 设备台账 / 实体
   · 阀门开关     AHT10 温湿度                        · 远程 OTA
   · 到位反馈     电池 ADC / 漏水探头                  · 日志回传
@@ -37,7 +46,7 @@ WiFi/MQTT 配置（存 NVS，运行时可切明文/TLS）、固件上传（网�
 |---|---|
 | MCU | ESP32-C3（4 MB flash，双 OTA 槽） |
 | RS485 | UART + DE 方向控制（引脚见 `main/app_config.h`） |
-| 水表 | 超声水表，Modbus RTU 从站（寄存器映射隔离在 `water_meter.c`，换表只改这一层） |
+| 水表 | 山东依泉 光电直读式电子远传水表（Modbus RTU 从站，光电阀控；寄存器映射隔离在 `water_meter.c`，换表只改这一层） |
 | 温湿度 | AHT10（I2C） |
 | 漏水 | `GPIO1` —— **必须避开 `GPIO2/8/9`** 这三个 strapping 脚 |
 | 阀门/按钮/LED | 开阀、关阀、状态灯、MQTT 活动灯（引脚见 `app_config.h`） |
