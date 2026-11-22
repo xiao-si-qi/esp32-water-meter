@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ESP32 Water Meter</title>
+<style>
+  :root {
+    --bg: #0f1720;
+    --card: #19232e;
+    --line: #26333f;
+    --text: #e6edf3;
+    --muted: #8fa3b3;
+    --accent: #35c46b;
+    --danger: #e5534b;
+    --warn: #d29922;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 18px;
+    background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  header { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+  h1 { font-size: 19px; margin: 0; font-weight: 600; }
+  .badges { display: flex; gap: 8px; flex-wrap: wrap; }
+  .badge {
+    font-size: 12px; padding: 4px 10px; border-radius: 999px;
+    background: #223040; color: var(--muted); border: 1px solid var(--line);
+  }
+  .badge.on { color: #0d1a12; background: var(--accent); border-color: var(--accent); font-weight: 600; }
+  .badge.off { color: #fff; background: var(--danger); border-color: var(--danger); }
+  .banner {
+    display: none; padding: 10px 14px; border-radius: 10px; margin-bottom: 14px;
+    background: rgba(210,153,34,.15); border: 1px solid var(--warn); color: #f0c674; font-size: 13px;
+  }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 14px 16px;
+  }
+  .card .label { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  .card .value { font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .card .unit { font-size: 13px; color: var(--muted); margin-left: 3px; font-weight: 400; }
+  .card.wide { grid-column: span 2; }
+  section { margin-top: 20px; }
+  h2 { font-size: 14px; color: var(--muted); font-weight: 600; margin: 0 0 10px; letter-spacing: .3px; }
+  .panel { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; }
+  button {
+    font: inherit; font-size: 14px; padding: 10px 18px; border-radius: 9px; cursor: pointer;
+    border: 1px solid var(--line); background: #223040; color: var(--text); transition: .15s;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #0d1a12; font-weight: 600; }
+  button.primary:hover:not(:disabled) { filter: brightness(1.1); color: #0d1a12; }
+  button.danger:hover:not(:disabled) { border-color: var(--danger); color: var(--danger); }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 5px; }
+  input {
+    width: 100%; font: inherit; font-size: 14px; padding: 9px 11px; border-radius: 8px;
+    background: #121b24; border: 1px solid var(--line); color: var(--text);
+  }
+  input:focus { outline: none; border-color: var(--accent); }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 8px; line-height: 1.6; }
+  .msg { font-size: 13px; margin-top: 10px; min-height: 18px; }
+  .msg.ok { color: var(--accent); }
+  .msg.err { color: var(--danger); }
+  .progress {
+    display: none; height: 8px; margin-top: 12px; border-radius: 999px;
+    background: #121b24; border: 1px solid var(--line); overflow: hidden;
+  }
+  .progress > div { height: 100%; width: 0; background: var(--accent); transition: width .15s; }
+  input[type=file] { padding: 8px; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
+  @media (max-width: 560px) { .two { grid-template-columns: 1fr; } .card.wide { grid-column: span 1; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>ESP32 Water Meter</h1>
+    <div class="badges">
+      <span class="badge" id="badge-wifi">Wi-Fi</span>
+      <span class="badge" id="badge-mqtt">MQTT</span>
+      <span class="badge" id="badge-uptime">--</span>
+    </div>
+  </header>
+
+  <div class="banner" id="banner">与水表通信异常，数据可能不是最新的</div>
+
+  <div class="grid">
+    <div class="card"><div class="label">累计水量</div>
+      <div class="value"><span id="volume">--</span><span class="unit">m³</span></div></div>
+    <div class="card"><div class="label">阀门状态</div>
+      <div class="value" id="valve">--</div></div>
+    <div class="card"><div class="label">电池电压</div>
+      <div class="value"><span id="battery-v">--</span><span class="unit">V</span></div></div>
+    <div class="card"><div class="label">电池电量</div>
+      <div class="value"><span id="battery-p">--</span><span class="unit">%</span></div></div>
+    <div class="card"><div class="label">温度</div>
+      <div class="value"><span id="temperature">--</span><span class="unit">°C</span></div></div>
+    <div class="card"><div class="label">湿度</div>
+      <div class="value"><span id="humidity">--</span><span class="unit">%</span></div></div>
+    <div class="card"><div class="label">Wi-Fi 信号 <span id="rssi-quality"></span></div>
+      <div class="value"><span id="rssi">--</span><span class="unit">dBm</span></div></div>
+    <div class="card"><div class="label">设备 IP</div>
+      <div class="value" id="ip" style="font-size:17px">--</div></div>
+    <div class="card"><div class="label">固件版本</div>
+      <div class="value" id="version" style="font-size:20px">--</div></div>
+    <div class="card"><div class="label">阀门故障</div>
+      <div class="value" id="valve-fault" style="font-size:18px">--</div></div>
+    <div class="card"><div class="label">通信故障</div>
+      <div class="value" id="comm-fault" style="font-size:18px">--</div></div>
+    <div class="card"><div class="label">漏水检测</div>
+      <div class="value" id="leak" style="font-size:18px">--</div></div>
+    <div class="card"><div class="label">最近事件</div>
+      <div class="value" id="last-event" style="font-size:15px">--</div></div>
+  </div>
+
+  <section>
+    <h2>阀门控制</h2>
+    <div class="panel">
+      <div class="row">
+        <button class="primary" id="btn-open">开阀</button>
+        <button class="danger" id="btn-close">关阀</button>
+      </div>
+      <div class="hint">水表机械阀动作约 12 秒，期间按钮会锁定，完成后自动确认实际状态。</div>
+      <div class="msg" id="valve-msg"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>设备信息</h2>
+      <div class="row">
+        <div>
+          <label for="dev-id">设备 ID（主题里的名字，不可改）</label>
+          <input id="dev-id" disabled>
+        </div>
+        <div>
+          <label for="dev-name">中文名（HA 里显示的名字）</label>
+          <input id="dev-name" placeholder="例如：入户水表" autocomplete="off">
+        </div>
+      </div>
+      <button class="primary" id="btn-device">保存中文名</button>
+      <div class="msg" id="dev-msg"></div>
+
+      <h2>MQTT 配置</h2>
+    <div class="panel">
+      <label for="mqtt-uri">Broker 地址（mqtt:// 或 mqtts://）</label>
+      <input id="mqtt-uri" placeholder="mqtt://example.com:1883" autocomplete="off">
+      <div class="two">
+        <div>
+          <label for="mqtt-user">用户名</label>
+          <input id="mqtt-user" autocomplete="off">
+        </div>
+        <div>
+          <label for="mqtt-pass">密码</label>
+          <input id="mqtt-pass" type="password" placeholder="留空则不修改" autocomplete="new-password">
+        </div>
+      </div>
+      <div class="row" style="margin-top:14px">
+        <button class="primary" id="btn-mqtt">保存并重连</button>
+      </div>
+      <div class="hint" id="mqtt-hint">加载中…</div>
+      <div class="msg" id="mqtt-msg"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Wi-Fi 配置</h2>
+    <div class="panel">
+      <div class="two">
+        <div>
+          <label for="wifi-ssid">SSID</label>
+          <input id="wifi-ssid" autocomplete="off">
+        </div>
+        <div>
+          <label for="wifi-pass">密码</label>
+          <input id="wifi-pass" type="password" autocomplete="new-password">
+        </div>
+      </div>
+      <div class="row" style="margin-top:14px">
+        <button class="primary" id="btn-wifi">保存并重连</button>
+      </div>
+      <div class="hint">加密方式自动按「密码为空 = 开放网络，否则 WPA2-PSK」处理。保存后会断开当前连接，设备可能换 IP。</div>
+      <div class="msg" id="wifi-msg"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>固件更新</h2>
+    <div class="panel">
+      <label for="ota-file">选择固件文件（water_meter.bin）</label>
+      <input id="ota-file" type="file" accept=".bin">
+      <div class="row" style="margin-top:14px">
+        <button class="primary" id="btn-ota">上传并更新</button>
+      </div>
+      <div class="progress" id="ota-progress"><div id="ota-bar"></div></div>
+      <div class="hint" id="ota-hint">加载中…</div>
+      <div class="hint">固件写入备用分区，校验通过后才切换启动分区。上传中断或镜像不合法都不会影响当前固件。</div>
+      <div class="msg" id="ota-msg"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>登录凭据</h2>
+    <div class="panel">
+      <div class="two">
+        <div>
+          <label for="auth-user">用户名</label>
+          <input id="auth-user" autocomplete="username">
+        </div>
+        <div>
+          <label for="auth-pass">新密码</label>
+          <input id="auth-pass" type="password" autocomplete="new-password">
+        </div>
+      </div>
+      <div class="row" style="margin-top:14px">
+        <button class="primary" id="btn-auth">保存凭据</button>
+      </div>
+      <div class="hint">出厂默认 admin/admin。修改后浏览器会要求重新登录；凭据经 HTTP 明文传输，请仅在可信局域网使用。</div>
+      <div class="msg" id="auth-msg"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>系统</h2>
+    <div class="panel">
+      <div class="row">
+        <button class="danger" id="btn-reboot">重启设备</button>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+function setBadge(el, on, text) {
+  el.textContent = text;
+  el.className = 'badge ' + (on ? 'on' : 'off');
+}
+
+function fmt(value, digits) {
+  return (typeof value === 'number' && isFinite(value)) ? value.toFixed(digits) : '--';
+}
+
+/* RSSI 转信号质量：-90 dBm 记为 0%，-50 dBm 及以上记为 100% */
+function wifiQuality(dbm) {
+  if (typeof dbm !== 'number' || !isFinite(dbm) || dbm === 0) return null;
+  const pct = Math.round((dbm + 90) / 40 * 100);
+  return Math.max(0, Math.min(100, pct));
+}
+
+function wifiLabel(pct) {
+  if (pct >= 75) return '强';
+  if (pct >= 50) return '良';
+  if (pct >= 25) return '弱';
+  return '很差';
+}
+
+function setFault(el, faulty) {
+  el.textContent = faulty ? '异常' : '正常';
+  el.style.color = faulty ? 'var(--danger)' : 'var(--accent)';
+}
+
+/* 事件名是给机器用的标识符（HA 自动化按它匹配），这里翻译成中文给人看 */
+const EVENT_LABELS = {
+  device_boot: '设备启动',
+  leak_detected: '检测到漏水',
+  leak_cleared: '漏水已解除',
+  valve_blocked_by_leak: '漏水期间拒绝开阀',
+  valve_ok: '阀门动作正常',
+  valve_cmd_failed: '阀门指令下发失败',
+  valve_not_confirmed: '阀门未到位',
+  valve_comm_lost: '阀门状态读不到',
+  comm_ok: '通信恢复',
+  comm_timeout: '从站无应答',
+  comm_crc: 'CRC 校验错误',
+  comm_exception: '从站异常应答',
+  comm_bad_frame: '应答帧异常',
+  comm_bad_length: '应答长度异常',
+  comm_tx: '串口发送失败',
+  comm_unknown: '未知通信故障'
+};
+
+function eventLabel(name) {
+  if (!name) return '--';
+  return EVENT_LABELS[name] || name;
+}
+
+function showMsg(id, text, ok) {
+  const el = $(id);
+  el.textContent = text;
+  el.className = 'msg ' + (ok ? 'ok' : 'err');
+}
+
+let valveMoving = false;
+
+async function refresh() {
+  try {
+    const res = await fetch('/api/status', { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const s = await res.json();
+
+    $('volume').textContent = fmt(s.volume_m3, 0);
+    $('valve').textContent = s.valve_moving ? '动作中…' : (s.valve_open ? '开' : '关');
+    $('valve').style.color = s.valve_moving ? 'var(--warn)' : (s.valve_open ? 'var(--accent)' : 'var(--muted)');
+    $('battery-v').textContent = fmt(s.battery_v, 3);
+    $('battery-p').textContent = s.battery_pct;
+    $('battery-p').style.color = s.battery_pct <= 15 ? 'var(--danger)'
+                               : (s.battery_pct <= 30 ? 'var(--warn)' : '');
+    $('temperature').textContent = fmt(s.temperature, 2);
+    $('humidity').textContent = fmt(s.humidity, 2);
+
+    $('rssi').textContent = s.rssi;
+    const quality = wifiQuality(s.rssi);
+    if (quality !== null) {
+      const color = quality >= 50 ? 'var(--accent)'
+                  : (quality >= 25 ? 'var(--warn)' : 'var(--danger)');
+      $('rssi').style.color = color;
+      $('rssi-quality').textContent = '（' + wifiLabel(quality) + ' ' + quality + '%）';
+      $('rssi-quality').style.color = color;
+    }
+    $('ip').textContent = s.ip;
+    $('version').textContent = s.version || '--';
+    $('version').title = (s.build_time || '') + '  ' + (s.partition || '');
+
+    setFault($('valve-fault'), s.valve_fault);
+    setFault($('comm-fault'), s.comm_fail);
+
+    const leakEl = $('leak');
+    leakEl.textContent = s.leak_detected ? '漏水！' : '正常';
+    leakEl.style.color = s.leak_detected ? 'var(--danger)' : 'var(--accent)';
+
+    $('last-event').textContent = eventLabel(s.last_event);
+    $('last-event').title = s.last_event || '';
+
+    setBadge($('badge-wifi'), s.wifi, s.wifi ? 'Wi-Fi 已连接' : 'Wi-Fi 断开');
+    setBadge($('badge-mqtt'), s.mqtt, s.mqtt ? 'MQTT 已连接' : 'MQTT 断开');
+    $('badge-uptime').textContent = '运行 ' + Math.floor(s.uptime_s / 60) + ' 分钟';
+
+    /* 漏水优先于通信异常提示：漏水是安全事故，通信只是数据可能过期 */
+    const banner = $('banner');
+    if (s.leak_detected) {
+      banner.textContent = '⚠️ 检测到漏水，阀门已自动关闭；排除漏水后需手动开启阀门';
+      banner.style.display = 'block';
+    } else if (s.comm_fail) {
+      banner.textContent = '与水表通信异常，数据可能不是最新的';
+      banner.style.display = 'block';
+    } else {
+      banner.style.display = 'none';
+    }
+
+    valveMoving = s.valve_moving;
+    $('btn-open').disabled = valveMoving;
+    $('btn-close').disabled = valveMoving;
+  } catch (e) {
+    setBadge($('badge-wifi'), false, '设备离线');
+    setBadge($('badge-mqtt'), false, '--');
+  }
+}
+
+async function postJson(url, payload) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  let data = {};
+  try { data = await res.json(); } catch (e) {}
+  if (!res.ok || data.ok === false) {
+    throw new Error(data.error || ('HTTP ' + res.status));
+  }
+  return data;
+}
+
+async function sendValve(state) {
+  try {
+    await postJson('/api/valve', { state });
+    showMsg('valve-msg', state === 'on' ? '已下发开阀指令，约 12 秒后完成' : '已下发关阀指令，约 12 秒后完成', true);
+    valveMoving = true;
+    $('btn-open').disabled = true;
+    $('btn-close').disabled = true;
+  } catch (e) {
+    showMsg('valve-msg', '指令失败：' + e.message, false);
+  }
+}
+
+$('btn-open').onclick = () => sendValve('on');
+$('btn-close').onclick = () => sendValve('off');
+
+async function loadDeviceInfo() {
+  try {
+    const r = await fetch('/api/device/config', { cache: 'no-store' });
+    if (!r.ok) return;
+    const d = await r.json();
+    $('dev-id').value = d.device_id || '';
+    $('dev-name').value = d.name || '';
+  } catch (e) { /* ignore */ }
+}
+
+$('btn-device').onclick = async () => {
+  const name = $('dev-name').value.trim();
+  const msg = $('dev-msg');
+  if (!name) { msg.textContent = '中文名不能为空'; msg.className = 'msg err'; return; }
+  const r = await fetch('/api/device/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (r.ok) {
+    msg.textContent = '已保存：' + (d.name || name) + '（重连 MQTT 后生效）';
+    msg.className = 'msg ok';
+  } else {
+    msg.textContent = '保存失败：' + (d.error || r.status);
+    msg.className = 'msg err';
+  }
+};
+
+$('btn-mqtt').onclick = async () => {
+  const payload = {
+    uri: $('mqtt-uri').value.trim(),
+    username: $('mqtt-user').value.trim(),
+    password: $('mqtt-pass').value
+  };
+  try {
+    await postJson('/api/mqtt/config', payload);
+    $('mqtt-pass').value = '';
+    showMsg('mqtt-msg', '已保存，正在重连…', true);
+  } catch (e) {
+    showMsg('mqtt-msg', '保存失败：' + e.message, false);
+  }
+};
+
+$('btn-wifi').onclick = async () => {
+  const ssid = $('wifi-ssid').value.trim();
+  if (!ssid) { showMsg('wifi-msg', 'SSID 不能为空', false); return; }
+  try {
+    await postJson('/api/wifi/config', { ssid, password: $('wifi-pass').value });
+    showMsg('wifi-msg', '已保存，设备正在用新凭据重连…', true);
+  } catch (e) {
+    showMsg('wifi-msg', '保存失败：' + e.message, false);
+  }
+};
+
+$('btn-reboot').onclick = async () => {
+  if (!confirm('确定要重启设备吗？')) return;
+  try { await postJson('/api/reboot', {}); } catch (e) {}
+};
+
+async function loadMqttConfig() {
+  try {
+    const res = await fetch('/api/mqtt/config', { cache: 'no-store' });
+    const c = await res.json();
+    $('mqtt-uri').value = c.uri || '';
+    $('mqtt-user').value = c.username || '';
+    $('mqtt-hint').textContent =
+      '当前传输：' + (c.tls ? 'TLS 加密' : '明文') +
+      '；密码' + (c.password_set ? '已设置（留空不修改）' : '未设置');
+  } catch (e) {
+    $('mqtt-hint').textContent = '无法读取 MQTT 配置';
+  }
+}
+
+async function loadOtaInfo() {
+  try {
+    const res = await fetch('/api/ota', { cache: 'no-store' });
+    const info = await res.json();
+    $('ota-hint').textContent = '当前版本 ' + (info.version || '?') +
+      '，运行分区 ' + info.running +
+      '；下次写入 ' + info.target +
+      '（槽容量 ' + (info.slot_size / 1024).toFixed(0) + ' KB）';
+  } catch (e) {
+    $('ota-hint').textContent = '无法读取分区信息';
+  }
+}
+
+$('btn-ota').onclick = () => {
+  const input = $('ota-file');
+  const file = input.files[0];
+  if (!file) { showMsg('ota-msg', '请先选择固件文件', false); return; }
+
+  const sizeKb = (file.size / 1024).toFixed(0);
+  if (!confirm('确定更新固件吗？设备将重启。\n文件：' + file.name + '（' + sizeKb + ' KB）')) return;
+
+  const bar = $('ota-bar');
+  $('ota-progress').style.display = 'block';
+  bar.style.width = '0%';
+  showMsg('ota-msg', '正在上传…', true);
+
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/ota');
+  xhr.upload.onprogress = e => {
+    if (e.lengthComputable) {
+      const pct = Math.round(e.loaded / e.total * 100);
+      bar.style.width = pct + '%';
+      showMsg('ota-msg', '上传中 ' + pct + '%', true);
+    }
+  };
+  xhr.onload = () => {
+    if (xhr.status === 200) {
+      bar.style.width = '100%';
+      showMsg('ota-msg', '更新成功，设备正在重启…', true);
+      $('btn-ota').disabled = true;
+    } else {
+      let msg = 'HTTP ' + xhr.status;
+      try { msg = JSON.parse(xhr.responseText).error || msg; } catch (e) {}
+      showMsg('ota-msg', '更新失败：' + msg, false);
+    }
+  };
+  xhr.onerror = () => showMsg('ota-msg', '上传失败（连接中断）', false);
+  xhr.send(file);
+};
+
+async function loadAuthConfig() {
+  try {
+    const res = await fetch('/api/auth/config', { cache: 'no-store' });
+    const c = await res.json();
+    $('auth-user').value = c.username || '';
+  } catch (e) {
+    /* 未登录时浏览器会先弹框，这里忽略 */
+  }
+}
+
+$('btn-auth').onclick = async () => {
+  const username = $('auth-user').value.trim();
+  const password = $('auth-pass').value;
+  if (!username) { showMsg('auth-msg', '用户名不能为空', false); return; }
+  if (!password) { showMsg('auth-msg', '密码不能为空', false); return; }
+
+  try {
+    await postJson('/api/auth/config', { username, password });
+    $('auth-pass').value = '';
+    showMsg('auth-msg', '已保存，请刷新页面并用新凭据登录', true);
+  } catch (e) {
+    showMsg('auth-msg', '保存失败：' + e.message, false);
+  }
+};
+
+loadMqttConfig();
+loadDeviceInfo();
+loadOtaInfo();
+loadAuthConfig();
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>

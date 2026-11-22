@@ -1,0 +1,4 @@
+dependencies:
+  espressif/mqtt: '*'
+  esp-idf-lib/aht: ^1.0.8
+ 
