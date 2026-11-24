@@ -90,3 +90,8 @@ cmake-build-debug/
 
 # 串口抓包与临时日志
 serial_*.txt
+
+# IDF 升级前的备份
+sdkconfig.bak-*
+dependencies.lock.bak-*
+build_v61/

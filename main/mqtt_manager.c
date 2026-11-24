@@ -85,6 +85,206 @@ static void publish_raw(const char *topic, const char *payload, int qos, bool re
     }
 }
 
+/* ==================== HA 实体声明（设备自注册） ====================
+ * 每个实体发一条 retained 配置到
+ *   homeassistant/<component>/switchyard_<id>/<object>/config
+ * 数据统一取自 switchyard/<id>/state，在线状态取自 availability，
+ * 阀门/重启的控制走 <prefix>/ha/<对象>/set（与插件的 cmd 通道隔离）。
+ *
+ * 加一个指标 = 在这里加一行 + 在 publish_state 里补上字段。
+ */
+typedef struct {
+    const char *component;
+    const char *object;
+    const char *name;
+    const char *field;          /* state JSON 里的字段名；NULL = 不由 state 提供 */
+    const char *unit;
+    const char *device_class;
+    const char *state_class;
+    const char *icon;
+    const char *cmd_topic;      /* 非 NULL → 生成 command_topic */
+    const char *payload_on;
+    const char *payload_off;
+    const char *payload_press;
+    int precision;              /* >0 才设置 suggested_display_precision；整数指标留 0 不设 */
+    bool from_availability;     /* true → state_topic 用 availability */
+    bool is_metric;             /* true → 同时写进 meta.metrics（供插件界面展示） */
+    bool diag;                  /* true → 归到 HA 设备的"诊断"分区 */
+} sy_entity_t;
+
+static const sy_entity_t k_entities[] = {
+    /* ---- 只读遥测 ---- */
+    {.component = "sensor", .object = "fw", .name = "固件", .field = "fw",
+     .icon = "mdi:chip", .is_metric = true, .diag = true},
+    {.component = "sensor", .object = "rssi", .name = "信号", .field = "rssi",
+     .unit = "dBm", .device_class = "signal_strength", .state_class = "measurement",
+     .icon = "mdi:wifi", .precision = 0, .is_metric = true, .diag = true},
+    {.component = "sensor", .object = "uptime", .name = "运行时长", .field = "uptime",
+     .unit = "s", .device_class = "duration", .state_class = "total_increasing",
+     .icon = "mdi:clock-outline", .precision = 0, .is_metric = true, .diag = true},
+    {.component = "sensor", .object = "water", .name = "累计水量", .field = "water",
+     .unit = "m³", .device_class = "water", .state_class = "total_increasing",
+     .icon = "mdi:water", .precision = 2, .is_metric = true},
+    {.component = "sensor", .object = "battery", .name = "电量", .field = "battery",
+     .unit = "%", .device_class = "battery", .state_class = "measurement",
+     .icon = "mdi:battery", .precision = 0, .is_metric = true, .diag = true},
+    {.component = "sensor", .object = "battery_v", .name = "电池电压", .field = "battery_v",
+     .unit = "V", .device_class = "voltage", .state_class = "measurement",
+     .icon = "mdi:battery-outline", .precision = 2, .is_metric = true, .diag = true},
+    {.component = "sensor", .object = "temp", .name = "温度", .field = "temp",
+     .unit = "°C", .device_class = "temperature", .state_class = "measurement",
+     .icon = "mdi:thermometer", .precision = 1, .is_metric = true},
+    {.component = "sensor", .object = "hum", .name = "湿度", .field = "hum",
+     .unit = "%", .device_class = "humidity", .state_class = "measurement",
+     .icon = "mdi:water-percent", .precision = 1, .is_metric = true},
+    {.component = "binary_sensor", .object = "leak", .name = "漏水", .field = "leak",
+     .device_class = "moisture", .icon = "mdi:water-alert", .is_metric = true},
+    {.component = "binary_sensor", .object = "comm_fault", .name = "通信故障", .field = "comm_fault",
+     .device_class = "problem", .icon = "mdi:connection", .is_metric = true},
+    {.component = "binary_sensor", .object = "valve_fault", .name = "阀门故障", .field = "valve_fault",
+     .device_class = "problem", .icon = "mdi:valve", .is_metric = true},
+
+    /* ---- 固有属性：在线状态读 availability（LWT 维护） ---- */
+    {.component = "binary_sensor", .object = "online", .name = "在线",
+     .device_class = "connectivity", .from_availability = true},
+
+    /* ---- 可操作：HA 控制下行，payload 用 HA 惯例 ---- */
+    {.component = "switch", .object = "valve", .name = "阀门", .field = "valve",
+     .icon = "mdi:valve",
+     .cmd_topic = APP_SY_TOPIC_HA_CMD_PREFIX "valve/set",
+     .payload_on = "ON", .payload_off = "OFF"},
+    {.component = "button", .object = "reboot", .name = "重启", .icon = "mdi:restart",
+     .cmd_topic = APP_SY_TOPIC_HA_CMD_PREFIX "reboot/set",
+     .payload_press = "PRESS"},
+};
+#define SY_ENTITY_COUNT (sizeof(k_entities) / sizeof(k_entities[0]))
+
+/** 布尔型实体：binary_sensor 和 switch，模板要输出 ON/OFF 而不是 true/false。 */
+static bool entity_is_bool(const sy_entity_t *e)
+{
+    return strcmp(e->component, "binary_sensor") == 0 || strcmp(e->component, "switch") == 0;
+}
+
+static const char *fw_version(void)
+{
+    return esp_app_get_description()->version;
+}
+
+static cJSON *build_device_block(void)
+{
+    cJSON *dev = cJSON_CreateObject();
+    if (dev == NULL) {
+        return NULL;
+    }
+    cJSON *ids = cJSON_AddArrayToObject(dev, "identifiers");
+    if (ids != NULL) {
+        cJSON_AddItemToArray(ids, cJSON_CreateString("switchyard_" APP_SY_DEVICE_ID));
+    }
+    cJSON_AddStringToObject(dev, "name", device_settings_name());
+    cJSON_AddStringToObject(dev, "manufacturer", APP_DEVICE_MANUFACTURER);
+    cJSON_AddStringToObject(dev, "model", APP_DEVICE_MODEL);
+    cJSON_AddStringToObject(dev, "sw_version", fw_version());
+    return dev;
+}
+
+/** 发布一条实体配置（topic 由 component/object 决定）。 */
+static void publish_one_entity(const sy_entity_t *e)
+{
+    cJSON *cfg = cJSON_CreateObject();
+    if (cfg == NULL) {
+        return;
+    }
+    char unique_id[64];
+    char object_id[48];
+    snprintf(unique_id, sizeof(unique_id), "switchyard_%s_%s", APP_SY_DEVICE_ID, e->object);
+    snprintf(object_id, sizeof(object_id), "%s_%s", APP_SY_DEVICE_ID, e->object);
+
+    cJSON_AddStringToObject(cfg, "name", e->name);
+    cJSON_AddStringToObject(cfg, "unique_id", unique_id);
+    cJSON_AddStringToObject(cfg, "object_id", object_id);
+    if (e->icon != NULL) {
+        cJSON_AddStringToObject(cfg, "icon", e->icon);
+    }
+
+    /* 数据来源 */
+    if (e->from_availability) {
+        cJSON_AddStringToObject(cfg, "state_topic", APP_SY_TOPIC_AVAILABILITY);
+        cJSON_AddStringToObject(cfg, "payload_on", "online");
+        cJSON_AddStringToObject(cfg, "payload_off", "offline");
+    } else if (e->field != NULL) {
+        cJSON_AddStringToObject(cfg, "state_topic", APP_SY_TOPIC_STATE);
+        char tpl[96];
+        if (entity_is_bool(e)) {
+            /* binary_sensor / switch：state 里是 true/false，HA 要 ON/OFF */
+            snprintf(tpl, sizeof(tpl), "{%% 'ON' if value_json.%s else 'OFF' %%}", e->field);
+            cJSON_AddStringToObject(cfg, "payload_on", "ON");
+            cJSON_AddStringToObject(cfg, "payload_off", "OFF");
+        } else {
+            snprintf(tpl, sizeof(tpl), "{%% value_json.%s %%}", e->field);
+        }
+        cJSON_AddStringToObject(cfg, "value_template", tpl);
+    }
+
+    if (e->unit != NULL) {
+        cJSON_AddStringToObject(cfg, "unit_of_measurement", e->unit);
+    }
+    if (e->device_class != NULL) {
+        cJSON_AddStringToObject(cfg, "device_class", e->device_class);
+    }
+    if (e->state_class != NULL) {
+        cJSON_AddStringToObject(cfg, "state_class", e->state_class);
+    }
+    if (e->precision > 0) {
+        cJSON_AddNumberToObject(cfg, "suggested_display_precision", e->precision);
+    }
+    /* 固件/信号/电量这类归到 HA 设备的"诊断"分区，主界面只留真正有用的数据 */
+    if (e->diag) {
+        cJSON_AddStringToObject(cfg, "entity_category", "diagnostic");
+    }
+
+    if (e->cmd_topic != NULL) {
+        cJSON_AddStringToObject(cfg, "command_topic", e->cmd_topic);
+        if (e->payload_on != NULL) {
+            cJSON_AddStringToObject(cfg, "payload_on", e->payload_on);
+        }
+        if (e->payload_off != NULL) {
+            cJSON_AddStringToObject(cfg, "payload_off", e->payload_off);
+        }
+        if (e->payload_press != NULL) {
+            cJSON_AddStringToObject(cfg, "payload_press", e->payload_press);
+        }
+    }
+
+    cJSON *dev = build_device_block();
+    if (dev != NULL) {
+        cJSON_AddItemToObject(cfg, "device", dev);
+    }
+    cJSON *origin = cJSON_CreateObject();
+    if (origin != NULL) {
+        cJSON_AddStringToObject(origin, "name", "switchyard-device");
+        cJSON_AddItemToObject(cfg, "origin", origin);
+    }
+
+    char *payload = cJSON_PrintUnformatted(cfg);
+    if (payload != NULL) {
+        char topic[128];
+        snprintf(topic, sizeof(topic), "%s/%s/%s/%s/config",
+                 APP_SY_HA_DISCOVERY_PREFIX, e->component, APP_SY_HA_NODE, e->object);
+        publish_raw(topic, payload, 1, true);
+        cJSON_free(payload);
+    }
+    cJSON_Delete(cfg);
+}
+
+/** 连接建立时发一次即可（retained）；另由 report 任务定期补发。 */
+static void publish_ha_discovery(void)
+{
+    for (size_t i = 0; i < SY_ENTITY_COUNT; i++) {
+        publish_one_entity(&k_entities[i]);
+    }
+    ESP_LOGI(TAG, "已发布 %u 个 HA 实体声明", (unsigned)SY_ENTITY_COUNT);
+}
+
 /** 把所有状态打成一个 JSON 发到 state 主题（retained）。 */
 static void publish_state(void)
 {
@@ -93,22 +293,23 @@ static void publish_state(void)
 
     const int64_t ts = time_sync_is_valid() ? (int64_t)time(NULL) : 0;
 
-    char json[512];
+    char json[640];
     snprintf(json, sizeof(json),
              "{\"id\":\"%s\",\"type\":\"%s\",\"fw\":\"%s\""
              ",\"rssi\":%d,\"ip\":\"%s\""
              ",\"battery\":%d,\"battery_v\":%.3f"
              ",\"temp\":%.2f,\"hum\":%.2f"
-             ",\"valve\":%s,\"leak\":%s,\"comm_fault\":%s"
+             ",\"valve\":%s,\"leak\":%s,\"comm_fault\":%s,\"valve_fault\":%s"
              ",\"water\":%.2f,\"water_unit\":\"m3\""
              ",\"ts\":%lld,\"uptime\":%lld}",
-             APP_SY_DEVICE_ID, APP_SY_TYPE, esp_app_get_description()->version,
+             APP_SY_DEVICE_ID, APP_SY_TYPE, fw_version(),
              st.rssi_dbm, st.ip_addr,
              st.battery_percent, st.battery_voltage_v,
              st.temperature_c, st.humidity_pct,
              st.valve_open ? "true" : "false",
              st.leak_detected ? "true" : "false",
              st.comm_fail ? "true" : "false",
+             st.valve_fault ? "true" : "false",
              st.volume_m3,
              (long long)ts,
              (long long)(esp_timer_get_time() / 1000000));
@@ -118,16 +319,71 @@ static void publish_state(void)
     s_state_dirty = false;
 }
 
-/** 能力声明：告诉 switchyard 这台设备会什么（决定它生成哪些 HA 实体/按钮）。 */
+/**
+ * 设备声明（retained）：台账显示用的 type/name/model + caps + metrics + ha_entities。
+ * 插件只用它渲染界面，**不据此生成任何 HA 实体**。
+ * 用 cJSON 拼，避免手写字符串的缓冲区溢出与转义问题。
+ */
 static void publish_meta(void)
 {
-    char json[256];
-    snprintf(json, sizeof(json),
-             "{\"type\":\"%s\",\"caps\":[%s],\"fw\":\"%s\""
-             ",\"name\":\"%s\",\"model\":\"%s\"}",
-             APP_SY_TYPE, APP_SY_CAPS, esp_app_get_description()->version,
-             device_settings_name(), APP_DEVICE_MODEL);
-    publish_raw(APP_SY_TOPIC_META, json, 1, true);
+    cJSON *root = cJSON_CreateObject();
+    if (root == NULL) {
+        return;
+    }
+    cJSON_AddStringToObject(root, "type", APP_SY_TYPE);
+    cJSON_AddStringToObject(root, "name", device_settings_name());
+    cJSON_AddStringToObject(root, "model", APP_DEVICE_MODEL);
+    cJSON_AddStringToObject(root, "fw", fw_version());
+
+    cJSON *caps = cJSON_AddArrayToObject(root, "caps");
+    if (caps != NULL) {
+        cJSON_AddItemToArray(caps, cJSON_CreateString("ota"));
+        cJSON_AddItemToArray(caps, cJSON_CreateString("log"));
+    }
+
+    cJSON *metrics = cJSON_AddArrayToObject(root, "metrics");
+    cJSON *ents = cJSON_AddArrayToObject(root, "ha_entities");
+    for (size_t i = 0; i < SY_ENTITY_COUNT; i++) {
+        const sy_entity_t *e = &k_entities[i];
+        if (e->is_metric && metrics != NULL) {
+            cJSON *m = cJSON_CreateObject();
+            if (m != NULL) {
+                cJSON_AddStringToObject(m, "key", e->field);
+                cJSON_AddStringToObject(m, "name", e->name);
+                if (e->component[0] == 'b') {
+                    cJSON_AddStringToObject(m, "kind", "binary_sensor");
+                }
+                if (e->unit != NULL) {
+                    cJSON_AddStringToObject(m, "unit", e->unit);
+                }
+                if (e->device_class != NULL) {
+                    cJSON_AddStringToObject(m, "device_class", e->device_class);
+                }
+                if (e->state_class != NULL) {
+                    cJSON_AddStringToObject(m, "state_class", e->state_class);
+                }
+                if (e->icon != NULL) {
+                    cJSON_AddStringToObject(m, "icon", e->icon);
+                }
+                cJSON_AddItemToArray(metrics, m);
+            }
+        }
+        if (ents != NULL) {
+            cJSON *ent = cJSON_CreateObject();
+            if (ent != NULL) {
+                cJSON_AddStringToObject(ent, "component", e->component);
+                cJSON_AddStringToObject(ent, "object", e->object);
+                cJSON_AddItemToArray(ents, ent);
+            }
+        }
+    }
+
+    char *payload = cJSON_PrintUnformatted(root);
+    if (payload != NULL) {
+        publish_raw(APP_SY_TOPIC_META, payload, 1, true);
+        cJSON_free(payload);
+    }
+    cJSON_Delete(root);
 }
 
 /** 事件：retained，HA 重启后仍能看到"最近事件"。 */
@@ -278,6 +534,44 @@ static void handle_cmd(const char *data, int len)
     cJSON_Delete(root);
 }
 
+/**
+ * HA 控制下行：<prefix>/ha/<对象>/set，payload 是 HA 的惯例值
+ * （switch 用 ON/OFF，button 用 PRESS）。与插件的 cmd 通道完全隔离。
+ */
+static void handle_ha_cmd(const char *topic, int topic_len, const char *data, int data_len)
+{
+    const size_t prefix_len = strlen(APP_SY_TOPIC_HA_CMD_PREFIX);
+    const int suffix_len = 4;                       /* "/set" */
+    const int obj_len = topic_len - (int)prefix_len - suffix_len;
+    if (obj_len <= 0 || obj_len > 16) {
+        return;
+    }
+    char object[17];
+    memcpy(object, topic + prefix_len, (size_t)obj_len);
+    object[obj_len] = '\0';
+
+    char payload[16];
+    int n = data_len < (int)sizeof(payload) - 1 ? data_len : (int)sizeof(payload) - 1;
+    if (n < 0) {
+        n = 0;
+    }
+    memcpy(payload, data, (size_t)n);
+    payload[n] = '\0';
+
+    leds_notify_mqtt_activity();
+    ESP_LOGI(TAG, "HA 控制: %s = %s", object, payload);
+
+    if (strcmp(object, "valve") == 0) {
+        valve_request(VALVE_SOURCE_MQTT, strcasecmp(payload, "ON") == 0);
+    } else if (strcmp(object, "reboot") == 0) {
+        ESP_LOGW(TAG, "HA 请求重启");
+        vTaskDelay(pdMS_TO_TICKS(300));
+        esp_restart();
+    } else {
+        ESP_LOGW(TAG, "未知的 HA 控制对象: %s", object);
+    }
+}
+
 /* ============================ 连接管理 ============================ */
 
 static void log_transport_error(const esp_mqtt_event_handle_t event)
@@ -306,8 +600,10 @@ static void mqtt_event_handler(void *arg, esp_event_base_t event_base, int32_t e
 
         publish_raw(APP_SY_TOPIC_AVAILABILITY, "online", 1, true);
         publish_meta();
+        publish_ha_discovery();
         publish_state();
         esp_mqtt_client_subscribe(s_client, APP_SY_TOPIC_CMD, 0);
+        esp_mqtt_client_subscribe(s_client, APP_SY_TOPIC_HA_CMD_WILD, 0);
 
         /* 连上后补发"最近事件"，避免 HA 停留在上一次会话 */
         {
@@ -328,6 +624,10 @@ static void mqtt_event_handler(void *arg, esp_event_base_t event_base, int32_t e
         if (event->topic_len == (int)strlen(APP_SY_TOPIC_CMD) &&
             strncmp(event->topic, APP_SY_TOPIC_CMD, (size_t)event->topic_len) == 0) {
             handle_cmd(event->data, event->data_len);
+        } else if (event->topic_len > (int)strlen(APP_SY_TOPIC_HA_CMD_PREFIX) &&
+                   strncmp(event->topic, APP_SY_TOPIC_HA_CMD_PREFIX,
+                           strlen(APP_SY_TOPIC_HA_CMD_PREFIX)) == 0) {
+            handle_ha_cmd(event->topic, event->topic_len, event->data, event->data_len);
         }
         break;
 
@@ -453,10 +753,20 @@ static void mqtt_report_task(void *arg)
 {
     (void)arg;
     int64_t last_ota_check = 0;
+    int64_t last_discovery = 0;
 
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(500));
         housekeeping();
+
+        /* 定期补发 HA 实体声明：broker 丢过 retained、或别的组件误清时能自愈 */
+        if (app_state_mqtt_connected()) {
+            const int64_t now = now_ms();
+            if ((now - last_discovery) >= (int64_t)APP_SY_HA_DISCOVERY_PERIOD_S * 1000) {
+                last_discovery = now;
+                publish_ha_discovery();
+            }
+        }
 
         /* 错误摘要：有就发，但 1 分钟内只发一条 */
         static int64_t s_last_diag_ms = 0;

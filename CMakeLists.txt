@@ -8,6 +8,6 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 # 固件版本号：会写入 app 镜像描述，可通过 esp_app_get_description()->version 读取，
 # 网页与 /api/status 都会显示它。发版时改这一行即可。
-set(PROJECT_VER "1.14.0")
+set(PROJECT_VER "1.15.0")
 
 project(water_meter)

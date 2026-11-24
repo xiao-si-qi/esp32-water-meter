@@ -146,8 +146,10 @@
 #define TASK_PRIO_MQTT_SUPERVISOR     6
 
 /* ==================== switchyard 设备协议（统一上位机） ====================
- * 设备只维护一条状态主题（retained JSON），由 switchyard 解析并生成 HA 实体，
- * 取代原先十几条 ha/watermeter/... 主题。
+ * 分工（v0.3 起）：
+ *   - HA 实体由**设备自己**发标准 MQTT Discovery，插件不在实体注册路径上；
+ *   - 只有「HA 做不到、必须插件代劳」的动作（固件分发、取日志）才走 cmd；
+ *   - 阀门/重启这类 HA 能表达的控制走 <prefix>/ha/<对象>/set，纯值 payload。
  */
 #define APP_SY_DEVICE_ID             APP_DEVICE_ID      /* wm_001，只能是 a-z 0-9 - _ */
 #define APP_SY_TOPIC_PREFIX          "switchyard/" APP_SY_DEVICE_ID
@@ -158,11 +160,20 @@
 #define APP_SY_TOPIC_META            APP_SY_TOPIC_PREFIX "/meta"
 #define APP_SY_TOPIC_DIAG            APP_SY_TOPIC_PREFIX "/diag"   /* 错误摘要（retained，限流）*/
 #define APP_SY_TOPIC_LOG             APP_SY_TOPIC_PREFIX "/log"    /* 按需抓取的日志（非 retained）*/
+
+/* 设备自注册的 HA 实体 */
+#define APP_SY_HA_DISCOVERY_PREFIX   "homeassistant"
+#define APP_SY_HA_NODE               "switchyard_" APP_SY_DEVICE_ID
+
+/* HA 控制下行：<prefix>/ha/<对象>/set（ESP-MQTT 支持 + 通配） */
+#define APP_SY_TOPIC_HA_CMD_WILD     APP_SY_TOPIC_PREFIX "/ha/+/set"
+#define APP_SY_TOPIC_HA_CMD_PREFIX   APP_SY_TOPIC_PREFIX "/ha/"
+
+/* caps：只列插件独有的管理能力（决定详情页显示哪些按钮），不生成 HA 实体。
+ * 具体内容在 mqtt_manager.c 的 publish_meta() 里用 cJSON 拼（防止缓冲区溢出）。 */
 #define APP_SY_TYPE                  "meter"
-#define APP_SY_CAPS                  "\"fw\",\"rssi\",\"uptime\",\"battery\",\"battery_v\"," \
-                                     "\"water\",\"climate\",\"leak\",\"comm_fault\",\"online\"," \
-                                     "\"valve\",\"ota\",\"reboot\",\"log\""
 #define APP_SY_STATE_PERIOD_S        60      /* 周期上报（状态变化时也会立刻发） */
+#define APP_SY_HA_DISCOVERY_PERIOD_S 600     /* 定期补发 discovery，防 broker 丢 retained */
 #define APP_SY_NVS_NAMESPACE         "switchyard"
 
 /* OTA 拉取模式：switchyard 加载项里配的 public_url */
